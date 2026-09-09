@@ -104,11 +104,11 @@ public class IdentityUtils {
      */
     public static String getCanonicalFingerprintJson(String sdpOffer) {
         String prefix = "a=fingerprint:";
-        return Arrays.stream(sdpOffer.split("\n"))
+        return Arrays.stream(sdpOffer.split("\n", 1024))
             .filter(line -> line.startsWith(prefix))
             .map(line -> line.substring(prefix.length()).trim())
             .map(line -> {
-                String[] parts = line.split(" ");
+                String[] parts = line.split(" ", 3);
                 if (parts.length != 2) {
                     throw new IllegalArgumentException("Invalid fingerprint line: " + line);
                 }

@@ -1,6 +1,7 @@
 package dev.kastle.netty.channel.nethernet;
 
 import dev.kastle.netty.channel.nethernet.config.DefaultNetherServerChannelConfig;
+import dev.kastle.netty.channel.nethernet.config.NetherChannelMetrics;
 import dev.kastle.netty.channel.nethernet.config.NetherChannelOption;
 import dev.kastle.netty.channel.nethernet.signaling.NetherNetServerSignaling;
 import dev.kastle.netty.channel.nethernet.signaling.NetherNetSignaling.IceServerInfo;
@@ -15,6 +16,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.jose4j.lang.JoseException;
 import tel.schich.libdatachannel.DataChannel;
 import tel.schich.libdatachannel.GatheringState;
+import tel.schich.libdatachannel.IceState;
 import tel.schich.libdatachannel.PeerConnection;
 import tel.schich.libdatachannel.PeerConnectionConfiguration;
 import tel.schich.libdatachannel.PeerState;
@@ -63,8 +65,8 @@ public class NetherNetServerChannel extends AbstractServerChannel {
         if (!(localAddress instanceof InetSocketAddress)) throw new IllegalArgumentException("Unsupported address type");
         this.localAddress = (InetSocketAddress) localAddress;
 
-        this.signaling.setNewConnectionHandler((connectionId, remoteNetworkId, offerSdp) -> {
-            acceptConnection(connectionId, offerSdp, remoteNetworkId);
+        this.signaling.setNewConnectionHandler((connectionId, remoteNetworkId, offerSdp, xuid) -> {
+            acceptConnection(connectionId, offerSdp, remoteNetworkId, xuid);
         });
 
         this.signaling.bind(localAddress, eventLoop());
@@ -96,7 +98,7 @@ public class NetherNetServerChannel extends AbstractServerChannel {
             .withPortRangeEnd((short) port);
     }
 
-    public void acceptConnection(long connectionId, String offerSdp, String remoteNetworkId) {
+    public void acceptConnection(long connectionId, String offerSdp, String remoteNetworkId, String remoteXuid) {
         PeerConnectionConfiguration rtcConfig = bindIce(this.config.getOption(NetherChannelOption.NETHER_PEER_CONNECTION_CONFIG))
             .withDisableAutoNegotiation(true)
             .withIceServers(this.signaling.getIceServers().stream().map(IceServerInfo::toUris).flatMap(List::stream).toList());
@@ -105,7 +107,7 @@ public class NetherNetServerChannel extends AbstractServerChannel {
         PeerConnection pc = PeerConnection.createPeer(rtcConfig);
         observer.setPeerConnection(pc);
 
-        NetherNetChildChannel child = new NetherNetChildChannel(this, pc, new InetSocketAddress(0), localAddress);
+        NetherNetChildChannel child = new NetherNetChildChannel(this, pc, new InetSocketAddress(0), localAddress, remoteXuid);
         observer.setChildChannel(child);
 
         child.closeFuture().addListener(future -> signaling.removeSignalHandler(connectionId));
@@ -114,6 +116,9 @@ public class NetherNetServerChannel extends AbstractServerChannel {
         ScheduledFuture<?> timeoutTask = eventLoop().schedule(() -> {
             if (!child.isActive()) {
                 log.warn("Connection {} timed out during handshake ({}s)", Long.toUnsignedString(connectionId), handshakeTimeoutSeconds);
+                if (child.pipeline() != null) {
+                    child.pipeline().fireUserEventTriggered(NetherDisconnectReason.HANDSHAKE_TIMEOUT);
+                }
                 child.close();
                 pc.close();
             }
@@ -214,6 +219,7 @@ public class NetherNetServerChannel extends AbstractServerChannel {
             pc.onDataChannel.register((peer, dataChannel) -> onDataChannel(dataChannel));
             pc.onLocalCandidate.register((peer, candidate, mediaId) -> onLocalCandidate(candidate));
             pc.onStateChange.register((peer, state) -> onConnectionChange(state));
+            pc.onIceStateChange.register((peer, state) -> onIceStateChange(state));
             pc.onGatheringStateChange.register((peer, state) -> onGatheringStateChange(state));
         }
 
@@ -254,17 +260,35 @@ public class NetherNetServerChannel extends AbstractServerChannel {
             return "unknown";
         }
 
+        private void onIceStateChange(IceState state) {
+            NetherChannelMetrics metrics = child != null ? child.config().getOption(NetherChannelOption.NETHER_METRICS) : null;
+            if (metrics != null) {
+                metrics.iceStateChange(state);
+            }
+        }
+
         private void onConnectionChange(PeerState state) {
             log.debug("Connection {} state changed: {}", Long.toUnsignedString(this.connectionId), state);
+
+            NetherChannelMetrics metrics = child != null ? child.config().getOption(NetherChannelOption.NETHER_METRICS) : null;
+            if (metrics != null) {
+                metrics.stateChange(state);
+            }
+
             if (state == PeerState.RTC_CONNECTED) {
                 // Resolve the real client address from the selected ICE candidate pair and store it on the child channel.
                 InetSocketAddress raw = this.peerConnection.remoteAddress();
                 this.child.setRemoteAddress(new InetSocketAddress(raw.getHostString(), raw.getPort()));
             }
             if (state == PeerState.RTC_FAILED || state == PeerState.RTC_CLOSED) {
-                if (child != null && child.isOpen()) {
-                    log.debug("Closing connection {} due to state change: {}", Long.toUnsignedString(this.connectionId), state);
-                    child.close();
+                if (child != null) {
+                    if (child.pipeline() != null) {
+                        child.pipeline().fireUserEventTriggered(state == PeerState.RTC_FAILED ? NetherDisconnectReason.ICE_FAILED : NetherDisconnectReason.CLOSED);
+                    }
+                    if (child.isOpen()) {
+                        log.debug("Closing connection {} due to state change: {}", Long.toUnsignedString(this.connectionId), state);
+                        child.close();
+                    }
                 }
                 if (handshakeTimeout != null) {
                     handshakeTimeout.cancel(false);

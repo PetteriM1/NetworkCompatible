@@ -284,7 +284,7 @@ public class NetherNetDiscovery extends SimpleChannelInboundHandler<DatagramPack
                 if (newConnectionHandler != null) {
                     String payload = parts.length > 2 ? parts[2] : "";
                     log.trace("Dispatching New Connection: ID={} Sender={}", Long.toUnsignedString(connectionId), Long.toUnsignedString(senderId));
-                    newConnectionHandler.onConnect(connectionId, Long.toUnsignedString(senderId), payload);
+                    newConnectionHandler.onConnect(connectionId, Long.toUnsignedString(senderId), payload, null);
                 } else {
                     log.debug("Received CONNECT_REQUEST but no NewConnectionHandler is set!");
                 }

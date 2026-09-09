@@ -1,6 +1,5 @@
 package dev.kastle.netty.channel.nethernet.signaling;
 
-import com.google.gson.JsonObject;
 import dev.kastle.netty.util.http.HttpLoggingHandler;
 import dev.kastle.netty.util.http.TlsRejectingHandler;
 import dev.kastle.netty.util.nethernet.IdentityUtils;
@@ -29,6 +28,7 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.HttpServerCodec;
 import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.QueryStringDecoder;
+import io.netty.handler.ssl.OptionalSslHandler;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.util.concurrent.FutureListener;
@@ -49,10 +49,10 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.util.Map;
-import java.util.Random;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * This class implements a signaling server using HTTP(S) for the NetherNet protocol.
@@ -62,13 +62,15 @@ import java.util.concurrent.TimeoutException;
 public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
     private final InternalLogger log = InternalLoggerFactory.getInstance(getClass());
 
-    private final Random random = new Random();
+    private final AtomicLong ID_COUNTER = new AtomicLong();
     private final Map<String, Promise<String>> pendingAnswers = new ConcurrentHashMap<>();
 
     private final PlayerFilter playerFilter;
     private final MotdProvider motdProvider;
 
-    private SslContext sslContext;
+    // Read by newly accepted connections on their own event loop thread, and swapped out by
+    // reloadHttpsKeystore() from whatever thread notices the keystore file changed.
+    private volatile SslContext sslContext;
     private ServerIdentity serverIdentity;
     private NewConnectionHandler newConnectionHandler;
 
@@ -80,17 +82,7 @@ public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
 
         if (builder.httpsKeystore != null) {
             try {
-                char[] passwordChars = builder.httpsPassword.toCharArray();
-
-                KeyStore ks = KeyStore.getInstance("PKCS12");
-                try (FileInputStream fis = new FileInputStream(builder.httpsKeystore)) {
-                    ks.load(fis, passwordChars);
-                }
-
-                KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-                kmf.init(ks, passwordChars);
-
-                this.sslContext = SslContextBuilder.forServer(kmf).build();
+                this.sslContext = loadSslContext(builder.httpsKeystore, builder.httpsPassword);
             } catch (Exception ex) {
                 log.error("Error loading https keystore: " + ex.getMessage(), ex);
             }
@@ -101,6 +93,38 @@ public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
         } catch (Exception ex) {
             log.error("Error loading identity keystore: " + ex.getMessage(), ex);
         }
+    }
+
+    private static SslContext loadSslContext(File httpsKeystore, String httpsPassword) throws Exception {
+        char[] passwordChars = httpsPassword.toCharArray();
+
+        KeyStore ks = KeyStore.getInstance("PKCS12");
+        try (FileInputStream fis = new FileInputStream(httpsKeystore)) {
+            ks.load(fis, passwordChars);
+        }
+
+        KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(ks, passwordChars);
+
+        return SslContextBuilder.forServer(kmf).build();
+    }
+
+    /**
+     * Reloads the TLS keystore used for connections accepted from now on, e.g. after a
+     * certificate renewal. Connections already in progress keep using whichever context was
+     * active when they were accepted. If loading fails, the previously active context (or lack
+     * of one) is left untouched.
+     *
+     * @param httpsKeystore PKCS12 keystore holding the TLS certificate and key
+     * @param httpsPassword Password for {@code httpsKeystore}, or "" if unprotected
+     * @throws Exception if the keystore can't be loaded
+     */
+    public void reloadHttpsKeystore(File httpsKeystore, String httpsPassword) throws Exception {
+        this.sslContext = loadSslContext(httpsKeystore, httpsPassword);
+    }
+
+    public void disableHttps() {
+        this.sslContext = null;
     }
 
     @Override
@@ -129,7 +153,7 @@ public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
                     ChannelPipeline p = ch.pipeline();
                     // Handle ssl or drop it
                     if (sslContext != null) {
-                        p.addLast(sslContext.newHandler(ch.alloc()));
+                        p.addLast(new OptionalSslHandler(sslContext));
                     } else {
                         p.addLast(new TlsRejectingHandler());
                     }
@@ -180,7 +204,11 @@ public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
                     return;
                 }
 
-                respondWithString(ctx, motd.toJson(), "application/json");
+                if (motd == null) {
+                    respondEmptyWithStatus(ctx, HttpResponseStatus.NOT_FOUND);
+                } else {
+                    respondWithString(ctx, motd.toJson(), "application/json");
+                }
                 return;
             }
 
@@ -262,7 +290,7 @@ public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
             });
 
             // We cant use the network ID as the connection ID as they can be out of the bounds of a long
-            newConnectionHandler.onConnect(random.nextLong(), networkId, sdpOffer);
+            newConnectionHandler.onConnect(ID_COUNTER.getAndIncrement(), networkId, sdpOffer, player.xuid());
         }
 
         @Override
@@ -283,7 +311,9 @@ public class NetherNetHTTPSignaling implements NetherNetServerSignaling {
         FullHttpResponse response = new DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK, bodyBuf);
         response.headers().set(HttpHeaderNames.CONTENT_TYPE, contentType);
         response.headers().setInt(HttpHeaderNames.CONTENT_LENGTH, bodyBuf.readableBytes());
-        ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
+        ctx.writeAndFlush(response).addListener((a) -> ctx.channel().eventLoop().schedule(() -> {
+            ctx.channel().close();
+        }, 30, TimeUnit.SECONDS));
     }
 
     @Override

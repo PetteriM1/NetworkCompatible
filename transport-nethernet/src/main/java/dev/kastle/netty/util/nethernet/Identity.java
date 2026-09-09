@@ -7,7 +7,7 @@ import java.util.Arrays;
 import java.util.Base64;
 
 public record Identity(Idp idp, Assertion assertion) {
-    private static Gson gson = new Gson();
+    private static final Gson gson = new Gson();
 
     public static Identity fromJson(String identityString) {
         return new Identity(gson.fromJson(identityString, Raw.class));
@@ -19,7 +19,7 @@ public record Identity(Idp idp, Assertion assertion) {
 
     public static Identity fromSdpOffer(String sdpOffer) {
         String prefix = "a=identity:";
-        String identity = Arrays.stream(sdpOffer.split("\n")).filter(line -> line.startsWith(prefix)).findFirst().orElse(null);
+        String identity = Arrays.stream(sdpOffer.split("\n", 1024)).filter(line -> line.startsWith(prefix)).findFirst().orElse(null);
         if (identity == null) {
             return null;
         }

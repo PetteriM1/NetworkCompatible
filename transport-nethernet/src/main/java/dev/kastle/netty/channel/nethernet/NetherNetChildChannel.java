@@ -9,10 +9,22 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 
 public class NetherNetChildChannel extends NetherNetChannel {
-    public NetherNetChildChannel(Channel parent, PeerConnection peerConnection, InetSocketAddress remote, InetSocketAddress local) {
+    private final String remoteXuid;
+
+    public NetherNetChildChannel(Channel parent, PeerConnection peerConnection, InetSocketAddress remote, InetSocketAddress local, String remoteXuid) {
         super(parent, remote, local);
         this.peerConnection = peerConnection;
         this.config = new DefaultNetherChannelConfig(this);
+        this.remoteXuid = remoteXuid;
+    }
+
+    /**
+     * The XUID from the remote peer's verified NetherNet identity assertion (see
+     * {@link dev.kastle.netty.util.nethernet.IdentityUtils#validateSdp}), or {@code null} if the
+     * signaling implementation that accepted this connection doesn't validate one.
+     */
+    public String getRemoteXuid() {
+        return remoteXuid;
     }
 
     @Override

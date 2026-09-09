@@ -179,7 +179,7 @@ public class ServerIdentity {
      */
     public String identityValue(String answerSdp) throws JoseException {
         // Generate and sign the fingerprint
-        String[] fingerprintParts = sign(IdentityUtils.getCanonicalFingerprintJson(answerSdp)).split("\\.");
+        String[] fingerprintParts = sign(IdentityUtils.getCanonicalFingerprintJson(answerSdp)).split("\\.", 4);
         String fingerprints = fingerprintParts[0] + ".." + fingerprintParts[2];
 
         Identity.Assertion assertion = new Identity.Assertion(token, fingerprints);

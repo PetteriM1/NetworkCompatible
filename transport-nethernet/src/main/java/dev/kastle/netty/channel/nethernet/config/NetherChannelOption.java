@@ -29,6 +29,13 @@ public class NetherChannelOption<T> extends ChannelOption<T> {
     public static final ChannelOption<Integer> NETHER_SERVER_RTC_HANDSHAKE_TIMEOUT_SECONDS =
             valueOf(NetherChannelOption.class, "NETHER_SERVER_RTC_HANDSHAKE_TIMEOUT_SECONDS");
 
+    /**
+     * The {@link NetherChannelMetrics} to report per-channel events to. Unset by default, in which
+     * case nothing is reported.
+     */
+    public static final ChannelOption<NetherChannelMetrics> NETHER_METRICS =
+            valueOf(NetherChannelOption.class, "NETHER_METRICS");
+
     @SuppressWarnings("deprecation")
     protected NetherChannelOption(String name) {
         super(name);

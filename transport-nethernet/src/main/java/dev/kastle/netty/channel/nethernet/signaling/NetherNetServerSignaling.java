@@ -43,8 +43,11 @@ public interface NetherNetServerSignaling extends NetherNetSignaling {
          * @param connectionId     The unique connection ID for this session.
          * @param remoteNetworkId  The Network ID of the remote peer.
          * @param payload          The initial signaling payload from the remote peer.
+         * @param xuid             The XUID from the peer's verified identity assertion, or
+         *                         {@code null} if this signaling implementation doesn't validate
+         *                         one (e.g. LAN discovery or raw Xbox RTA signaling).
          */
-        void onConnect(long connectionId, String remoteNetworkId, String payload);
+        void onConnect(long connectionId, String remoteNetworkId, String payload, String xuid);
     }
 
     /**

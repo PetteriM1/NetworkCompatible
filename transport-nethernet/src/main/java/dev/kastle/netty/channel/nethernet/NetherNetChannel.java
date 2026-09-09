@@ -1,6 +1,8 @@
 package dev.kastle.netty.channel.nethernet;
 
 import dev.kastle.netty.channel.nethernet.config.DefaultNetherChannelConfig;
+import dev.kastle.netty.channel.nethernet.config.NetherChannelMetrics;
+import dev.kastle.netty.channel.nethernet.config.NetherChannelOption;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.Channel;
@@ -30,8 +32,8 @@ public abstract class NetherNetChannel extends AbstractChannel {
     protected volatile SocketAddress remoteAddress;
     protected volatile SocketAddress localAddress;
 
-    protected DataChannel reliableChannel;
-    protected DataChannel unreliableChannel;
+    protected volatile DataChannel reliableChannel;
+    protected volatile DataChannel unreliableChannel;
 
     protected final Queue<Object> pendingWrites = new ConcurrentLinkedQueue<>();
 
@@ -59,6 +61,7 @@ public abstract class NetherNetChannel extends AbstractChannel {
                 if (!data.hasRemaining())
                     return;
 
+                NetherChannelMetrics metrics = config.getOption(NetherChannelOption.NETHER_METRICS);
                 int segments = data.get() & 0xFF;
 
                 if (currentSegmentCount == -1) {
@@ -67,6 +70,9 @@ public abstract class NetherNetChannel extends AbstractChannel {
                     if (segments != currentSegmentCount - 1) {
                         assemblyBuf.clear();
                         currentSegmentCount = -1;
+                        if (metrics != null) {
+                            metrics.reassemblyDropped();
+                        }
                         return;
                     }
                     currentSegmentCount = segments;
@@ -76,6 +82,9 @@ public abstract class NetherNetChannel extends AbstractChannel {
                     byte[] payload = new byte[data.remaining()];
                     data.get(payload);
                     assemblyBuf.writeBytes(payload);
+                    if (metrics != null) {
+                        metrics.bytesIn(payload.length);
+                    }
                 }
 
                 if (segments == 0) {
@@ -83,6 +92,10 @@ public abstract class NetherNetChannel extends AbstractChannel {
                         if (assemblyBuf.isReadable()) {
                             ByteBuf packet = assemblyBuf.copy();
                             assemblyBuf.skipBytes(assemblyBuf.readableBytes());
+
+                            if (metrics != null) {
+                                metrics.messagesIn(1);
+                            }
 
                             eventLoop().execute(() -> {
                                 pipeline().fireChannelRead(packet);
@@ -147,6 +160,10 @@ public abstract class NetherNetChannel extends AbstractChannel {
         if (!(msg instanceof ByteBuf))
             return;
 
+        if (reliableChannel.isClosed()) {
+            return;
+        }
+
         ByteBuf payload = (ByteBuf) msg;
 
         ByteBuf framed = payload.retainedDuplicate();
@@ -159,6 +176,7 @@ public abstract class NetherNetChannel extends AbstractChannel {
             segments++;
 
         try {
+            NetherChannelMetrics metrics = config.getOption(NetherChannelOption.NETHER_METRICS);
             int offset = 0;
             for (int i = 0; i < segments; i++) {
                 int remaining = segments - 1 - i;
@@ -172,7 +190,13 @@ public abstract class NetherNetChannel extends AbstractChannel {
                 chunk.flip();
 
                 reliableChannel.sendMessage(chunk);
+                if (metrics != null) {
+                    metrics.bytesOut(chunkSize);
+                }
                 offset += chunkSize;
+            }
+            if (metrics != null) {
+                metrics.messagesOut(1);
             }
         } catch (Exception e) {
             pipeline().fireExceptionCaught(e);
@@ -292,5 +316,21 @@ public abstract class NetherNetChannel extends AbstractChannel {
 
     public void setRemoteAddress(SocketAddress remoteAddress) {
         this.remoteAddress = remoteAddress;
+    }
+
+    public SocketAddress remoteAddress() {
+        return remoteAddress0();
+    }
+
+    public PeerConnection getPeerConnection() {
+        return this.peerConnection;
+    }
+
+    public DataChannel getReliableDataChannel() {
+        return this.reliableChannel;
+    }
+
+    public DataChannel getUnreliableDataChannel() {
+        return this.reliableChannel;
     }
 }
